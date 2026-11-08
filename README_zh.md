@@ -10,6 +10,9 @@ I did some changes to make params suitble for NWPU course
 
 ZHS 是一个针对智慧树平台的自动学习工具，支持知到共享课、Hike 职教云课、AI 智慧课程三类课程的自动学习。核心能力包括：扫码登录、视频进度模拟、弹窗答题、AI 自动作业与考试。
 
+> **第一次用先看 [docs/使用指南.md](docs/使用指南.md)**：Ubuntu 环境、`personal/` 个人数据目录、怎么拿到课程 ID、学习程度/掌握度怎么刷、常见报错处理。
+> 每个配置项的含义与改法见 [docs/配置说明.md](docs/配置说明.md)。
+
 > 如果我的项目对你有帮助，欢迎 star ⭐
 
 ## 功能特性
@@ -311,6 +314,8 @@ uv run mypy src/ tests/
 | [docs/spec.md](docs/spec.md) | 功能规格、API 端点、数据结构 |
 | [docs/design.md](docs/design.md) | 模块级设计、类签名、流程图 |
 | [docs/tutorial.md](docs/tutorial.md) | 使用教程 |
+| [docs/使用指南.md](docs/使用指南.md) | 实战手册：Ubuntu 安装、登录、课程 ID、掌握度策略、排错 |
+| [docs/配置说明.md](docs/配置说明.md) | 配置文件逐项说明与常见改法 |
 | [docs/test.md](docs/test.md) | 测试策略与用例 |
 | [docs/linter.md](docs/linter.md) | 代码规范 |
 | [docs/log.md](docs/log.md) | 开发日志（历史快照） |

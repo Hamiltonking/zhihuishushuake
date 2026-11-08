@@ -12,6 +12,9 @@ I did some changes to make params suitble for NWPU course
 
 ZHS is an auto-learning tool for the Zhihuishu platform, supporting three types of courses: Zhidao shared courses, Hike vocational education courses, and AI smart courses. Core capabilities include: QR code login, video progress simulation, popup quiz answering, AI auto homework and exams.
 
+> **Start with the [usage guide](docs/使用指南.md)** (Ubuntu setup, `personal/` data layout, how to get course IDs, learning-progress vs. mastery strategy, troubleshooting).
+> Every config key is explained in [docs/配置说明.md](docs/配置说明.md).
+
 > If this project helps you, please consider giving it a star ⭐
 
 ## Features
@@ -312,6 +315,8 @@ uv run mypy src/ tests/
 | [docs/spec.md](docs/spec.md) | Feature specifications, API endpoints, data structures |
 | [docs/design.md](docs/design.md) | Module-level design, class signatures, flowcharts |
 | [docs/tutorial.md](docs/tutorial.md) | User tutorial |
+| [docs/使用指南.md](docs/使用指南.md) | Hands-on guide: Ubuntu setup, login, course IDs, mastery strategy, troubleshooting |
+| [docs/配置说明.md](docs/配置说明.md) | Every config key explained |
 | [docs/test.md](docs/test.md) | Testing strategy and cases |
 | [docs/linter.md](docs/linter.md) | Code standards |
 | [docs/log.md](docs/log.md) | Development log (historical snapshots) |
