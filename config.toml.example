@@ -121,6 +121,9 @@ image_path = ""
 # ============================================================
 
 [ai]
+# AI 功能总开关（false 则完全不答题，作业/考试会退化成随机）
+enabled = true
+
 # AI 智慧课程是否使用智慧树内置 AI（默认开启，需要账号内有 AI 智慧课程）
 # 设为 false 则 AI 智慧课程也使用下方自定义 OpenAI 兼容接口
 use_builtin_ai = true
@@ -147,6 +150,17 @@ stream_timeout = 120.0
 # 思考型模型只发 reasoning_content 时的空 delta 也算活跃信号，不会被误判超时
 # 注意：以下两项只作用于 OpenAI 兼容接口；内置 AI（use_builtin_ai = true）走另一套 SSE 端点
 stream_idle_timeout = 30.0
+
+# 所有题型都会按题干联网搜索，并把「本地 PPT/文本资料 + 联网结果」一起喂给模型
+# 走 DeepSeek 官方搜索接口（POST /v1/tools/search），约 5 元 / 1000 次成功请求
+# 注意：填空题的“原文改写”仍只依据本地资料，联网摘要只作提示
+web_search = false
+
+# 搜索返回条数（1-50）
+web_search_count = 5
+
+# 结果的 rerank_score 下限（0-3，>=1.5 为优质结果）
+web_search_min_score = 1.5
 
 # ============================================================
 # 题库配置（可选，做题时查询外部题库作为 AI 的参考）

@@ -226,6 +226,7 @@ class ZhidaoAIProvider(LLMProvider):
         cache: str = ""
         event_count = 0
         current_event: str | None = None
+        marker_found = False
 
         for line in lines:
             if _time.monotonic() > deadline:
@@ -267,25 +268,29 @@ class ZhidaoAIProvider(LLMProvider):
                             cache += content
                 except json.JSONDecodeError:
                     logger.warning(f"TEXT 事件 JSON 解析失败: {data_str[:100]}")
-                # 检测答案标记
-                match = re.search(f"{re.escape(aim_start)}(.*?){re.escape(aim_end)}", cache, re.DOTALL)
-                if match:
-                    logger.info(f"检测到答案标记，提前终止 SSE 流（已处理 {event_count} 个事件）")
-                    return cache
+                # 检测答案标记（只记一次，继续读完整流）
+                if not marker_found and re.search(
+                    f"{re.escape(aim_start)}(.*?){re.escape(aim_end)}", cache, re.DOTALL
+                ):
+                    marker_found = True
+                    logger.info(f"检测到答案标记，继续读取剩余事件（已处理 {event_count} 个）")
                 continue
 
             # FULL_TEXT 事件：纯文本（可能多行）
             if data_str:
                 collected.append(data_str)
                 cache += data_str
-                # 检测答案标记
-                match = re.search(f"{re.escape(aim_start)}(.*?){re.escape(aim_end)}", cache, re.DOTALL)
-                if match:
-                    logger.info(f"检测到答案标记，提前终止 SSE 流（已处理 {event_count} 个事件）")
-                    return cache
+                # 检测答案标记（只记一次，继续读完整流）
+                if not marker_found and re.search(
+                    f"{re.escape(aim_start)}(.*?){re.escape(aim_end)}", cache, re.DOTALL
+                ):
+                    marker_found = True
+                    logger.info(f"检测到答案标记，继续读取剩余事件（已处理 {event_count} 个）")
 
-        # 流结束但未找到答案标记
         result = "".join(collected)
+        if marker_found and result:
+            return result
+        # 流结束但未找到答案标记
         if not result:
             logger.error("SSE 流响应为空，未找到答案标记")
             raise ZhsError("SSE 流响应为空，未找到答案标记")

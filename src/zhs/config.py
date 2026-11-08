@@ -140,6 +140,12 @@ class AIConfig(BaseModel):
         gt=0,
         description="OpenAI 兼容接口相邻 chunk 空闲等待上限（秒），决定首包最长等待",
     )
+    web_search: bool = Field(
+        default=False,
+        description="AI 课程做题时是否联网搜索参考资料（无 PPT 参考资料的知识点尤其有用，走 DeepSeek /v1/tools/search）",
+    )
+    web_search_count: int = Field(default=5, ge=1, le=50, description="联网搜索返回条数")
+    web_search_min_score: float = Field(default=1.5, ge=0, le=3, description="联网搜索结果的 rerank_score 下限")
 
     @model_validator(mode="after")
     def _check_timeout_order(self) -> "AIConfig":

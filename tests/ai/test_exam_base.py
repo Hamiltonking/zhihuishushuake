@@ -639,3 +639,48 @@ class TestAbstractMethods:
                 exam_paper_id=3,
                 ai_config=AIConfig(enabled=False),
             )
+
+
+class TestFillBlankAnchoring:
+    """填空题答案按参考资料原文还原"""
+
+    REFERENCE = (
+        "关键核心技术对国家经济高质量发展和国家安全具有重要意义。"
+        "科技创新的源头是基础理论研究。"
+        "全面深化改革必须一切依靠人民，尊重其主体地位和首创精神。"
+    )
+
+    def test_truncated_answer_is_expanded(self, exam_base: AiExamBase) -> None:
+        """答案是原文片段的前缀时，补全为原文用词"""
+        exam_base._reference_materials = [{"name": "p.pptx", "content": self.REFERENCE}]
+        got = exam_base._anchor_fill_blank("关键核心技术对国家____发展和国家安全具有重要意义。", ["经济"])
+        assert got == ["经济高质量"]
+
+    def test_over_specified_answer_is_narrowed(self, exam_base: AiExamBase) -> None:
+        """答案比原文多出限定词时，收窄为原文用词"""
+        exam_base._reference_materials = [{"name": "p.pptx", "content": self.REFERENCE}]
+        got = exam_base._anchor_fill_blank("全面深化改革必须一切依靠____，尊重其主体地位和首创精神。", ["人民群众"])
+        assert got == ["人民"]
+
+    def test_no_reference_keeps_answer(self, exam_base: AiExamBase) -> None:
+        """没有参考资料时原样返回"""
+        exam_base._reference_materials = []
+        assert exam_base._anchor_fill_blank("科技创新的源头是____。", ["基础研究"]) == ["基础研究"]
+
+    def test_missing_sentence_keeps_answer(self, exam_base: AiExamBase) -> None:
+        """参考资料里没有对应句子时原样返回"""
+        exam_base._reference_materials = [{"name": "p.pptx", "content": "与题目无关的内容。"}]
+        assert exam_base._anchor_fill_blank("科技创新的源头是____。", ["基础研究"]) == ["基础研究"]
+
+    def test_two_blanks(self, exam_base: AiExamBase) -> None:
+        """两个空分别还原"""
+        exam_base._reference_materials = [
+            {"name": "p.pptx", "content": "党依靠人民创造历史伟业的根本途径是一切依靠人民和一切为了人民。"}
+        ]
+        got = exam_base._anchor_fill_blank("党依靠人民创造历史伟业的根本途径是____和____。", ["一切依靠人民", "一切为了人民"])
+        assert got == ["一切依靠人民", "一切为了人民"]
+
+    def test_no_blank_marker(self, exam_base: AiExamBase) -> None:
+        """题干没有空白标记时不报错"""
+        exam_base._reference_materials = [{"name": "p.pptx", "content": "任意内容。"}]
+        assert exam_base._anchor_fill_blank("普通题目。", ["x"]) == ["x"]

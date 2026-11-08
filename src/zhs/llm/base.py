@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from zhs.llm.prompts import (
     build_choice_prompt,
     build_fill_blank_prompt,
+    count_blanks,
     parse_choice_answer,
     parse_fill_blank_answer,
 )
@@ -72,12 +73,12 @@ class LLMProvider(ABC):
         """填空题：构建 Prompt → 调用 LLM → 解析答案"""
         prompt = build_fill_blank_prompt(question, reference_materials, extra)
         result = self.completion(prompt)
-        return parse_fill_blank_answer(result)
+        return parse_fill_blank_answer(result, expected=count_blanks(question))
 
     def parse_choice_answer(self, completion: str) -> list[int]:
         """从 LLM 输出提取选项 ID 列表"""
         return parse_choice_answer(completion)
 
-    def parse_fill_blank_answer(self, completion: str) -> list[str]:
+    def parse_fill_blank_answer(self, completion: str, expected: int = 0) -> list[str]:
         """从 LLM 输出提取填空答案"""
-        return parse_fill_blank_answer(completion)
+        return parse_fill_blank_answer(completion, expected=expected)

@@ -1,5 +1,6 @@
 """PPT 转文本（本地 python-pptx）"""
 
+import zipfile
 from pathlib import Path
 
 from loguru import logger
@@ -29,8 +30,16 @@ class PptConverter:
             logger.error(f"PPT 转换失败: {e}")
             return ""
 
+    @staticmethod
+    def _is_valid_pptx(path: Path) -> bool:
+        """PPTX 本质是 zip 包：能当 zip 打开才算完整（半截文件会被判为损坏）"""
+        try:
+            return path.exists() and path.stat().st_size > 0 and zipfile.is_zipfile(path)
+        except OSError:
+            return False
+
     def _download(self, url: str) -> Path:
-        """下载 PPT 文件到本地"""
+        """下载 PPT 文件到本地（校验 zip 完整性，先写 .part 再原子替换）"""
         from urllib.parse import urlparse
 
         import httpx
@@ -40,17 +49,27 @@ class PptConverter:
         local_path = self._download_path / file_path
 
         if local_path.exists():
-            logger.info(f"文件已存在: {local_path}")
-            return local_path
+            if self._is_valid_pptx(local_path):
+                logger.debug(f"文件已存在: {local_path}")
+                return local_path
+            # 之前下载被中断会留下半截文件，只判断 exists() 会永远复用它
+            logger.warning(f"缓存文件损坏，重新下载: {local_path}")
+            local_path.unlink(missing_ok=True)
 
         local_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = local_path.with_name(local_path.name + ".part")
 
         with httpx.stream("GET", url) as response:
             response.raise_for_status()
-            with open(local_path, "wb") as f:
+            with open(tmp_path, "wb") as f:
                 for chunk in response.iter_bytes(chunk_size=8192):
                     f.write(chunk)
 
+        if not self._is_valid_pptx(tmp_path):
+            tmp_path.unlink(missing_ok=True)
+            raise ValueError(f"下载的 PPT 不是完整的 zip 包: {url}")
+
+        tmp_path.replace(local_path)
         logger.info(f"文件已下载: {local_path}")
         return local_path
 

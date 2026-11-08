@@ -142,3 +142,34 @@ class TestParseFillBlankAnswer:
         """无 answer 代码块 → 空列表"""
         result = parse_fill_blank_answer("没有答案")
         assert result == []
+
+
+class TestParseFillBlankMultipleBlanks:
+    """多空填空题的答案切分"""
+
+    def test_split_single_line_by_slash(self) -> None:
+        """多个空写在一行用 / 分隔时按空数拆分"""
+        out = parse_fill_blank_answer("```answer\n领导体制/决策机制\n```", expected=2)
+        assert out == ["领导体制", "决策机制"]
+
+    def test_no_split_when_counts_mismatch(self) -> None:
+        """拆分后个数对不上就保持原样"""
+        out = parse_fill_blank_answer("```answer\n领导体制/决策机制\n```", expected=3)
+        assert out == ["领导体制/决策机制"]
+
+    def test_single_blank_keeps_punctuation(self) -> None:
+        """只有一个空时不做任何拆分"""
+        out = parse_fill_blank_answer("```answer\n富强、民主\n```", expected=1)
+        assert out == ["富强、民主"]
+
+
+class TestParseChoiceAnswerPlainIds:
+    """多选题纯 id 数组的兼容"""
+
+    def test_plain_int_ids(self) -> None:
+        """[123, 456] 这种纯 id 数组也能解析"""
+        assert parse_choice_answer("```answer\n[123, 456]\n```") == [123, 456]
+
+    def test_string_ids(self) -> None:
+        """字符串形式的 id 也能解析"""
+        assert parse_choice_answer("```answer\n[\"123\", \"456\"]\n```") == [123, 456]

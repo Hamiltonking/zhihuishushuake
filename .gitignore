@@ -46,3 +46,5 @@ old/
 
 #config
 config.toml
+# 配置备份
+config.toml.bak

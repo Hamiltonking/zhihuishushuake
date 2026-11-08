@@ -19,6 +19,7 @@
 
 import contextlib
 import random
+import re
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -27,11 +28,13 @@ from typing import Any
 from loguru import logger
 
 from zhs.ai.models import QuestionContent, QuestionSheet
+from zhs.api.web_search import WebSearchClient
 from zhs.cache.ai_cache import AiExamCache
 from zhs.config import AIConfig
 from zhs.exceptions import ZhsError
 from zhs.llm.base import LLMProvider
 from zhs.llm.factory import LLMProviderFactory
+from zhs.llm.prompts import build_fill_blank_repair_prompt
 from zhs.question_bank.client import QuestionBankClient
 from zhs.question_bank.models import map_question_type
 from zhs.reporter import ConsoleReporter, ProgressReporter
@@ -72,6 +75,10 @@ class AiExamBase(ABC):
 
         # 缓存（当前 exam 内存缓存，持久化通过 self._cache）
         self._answer_cache: dict[str, dict[str, Any]] = {}
+
+        # 联网搜索（开启时按题干补充参考资料）
+        self._web_search = WebSearchClient.from_config(ai_config)
+        self._web_materials: dict[int, list[dict[str, str]]] = {}
 
         # 状态
         self._sheet_content: list[QuestionSheet] | None = None
@@ -273,7 +280,11 @@ class AiExamBase(ABC):
         question_text = extract_text(question.content) if self._cross_exam_search else ""
         cached = self._get_cached_answer(question_id, question_text)
         if cached is not None:
-            return cached, "cached"
+            if self._is_cache_compatible(question, cached):
+                return cached, "cached"
+            # 跨卷复用是按题干匹配的：题目相同但选项 ID 变了（换卷/重新生成）时
+            # 旧答案里的 ID 在新卷里根本不存在，直接提交会答错，所以丢弃重答。
+            logger.info(f"缓存答案与当前选项不匹配，改为重新作答（题目 {question_id}）：{cached}")
 
         # 选项
         choices = [{"id": opt.id, "content": opt.content} for opt in question.option_vos]
@@ -286,23 +297,26 @@ class AiExamBase(ABC):
         if self._provider is not None:
             extra = self._build_extra(question, choices)
             try:
+                # 所有题型统一：本地参考资料 + 联网搜索结果一起喂给模型
+                materials = self._question_materials(question)
+
                 if question_type == 1:
-                    ids = self._provider.single_choice(question.content, choices, self._reference_materials, extra)
+                    ids = self._provider.single_choice(question.content, choices, materials, extra)
                     if ids:
                         return [str(i) for i in ids], "AI generated"
                     logger.warning(f"{question.content} {question_id} AI provide empty")
                 elif question_type == 2:
-                    ids = self._provider.multiple_choice(question.content, choices, self._reference_materials, extra)
+                    ids = self._provider.multiple_choice(question.content, choices, materials, extra)
                     if ids:
                         return [str(i) for i in ids], "AI generated"
                 elif question_type == 14:
-                    ids = self._provider.judgement(question.content, choices, self._reference_materials, extra)
+                    ids = self._provider.judgement(question.content, choices, materials, extra)
                     if ids:
                         return [str(i) for i in ids], "AI generated"
                 elif question_type == 3:
-                    answers = self._provider.fill_blank(question.content, self._reference_materials, extra)
+                    answers = self._provider.fill_blank(question.content, materials, extra)
                     if answers:
-                        return answers, "AI generated"
+                        return self._anchor_fill_blank(question.content, answers, materials), "AI generated"
             except Exception as e:
                 logger.error(f"AI 生成答案失败: {e}")
 
@@ -318,6 +332,190 @@ class AiExamBase(ABC):
         elif question_type == 14 and choices:
             return [str(random.choice(choices)["id"])], "random"
         return [], "random"
+
+    @staticmethod
+    def _is_cache_compatible(question: QuestionContent, answers: list[str]) -> bool:
+        """缓存里的答案能否直接用于当前题目
+
+        选择题/判断题的答案是选项 ID，跨卷复用必须确认这些 ID 在当前题目里都存在；
+        填空题答案是文本，永远兼容。
+        """
+        if question.question_type not in (1, 2, 14):
+            return True
+        valid_ids = {str(option.id) for option in question.option_vos}
+        return bool(answers) and all(answer in valid_ids for answer in answers)
+
+    # --- 填空题原文对齐 ---
+
+    _FILL_BLANK_TRIM = " \t\r\n\u201c\u201d\"'\u2018\u2019\u300a\u300b<>()\uff08\uff09[]\u3010\u3011"
+    _FILL_BLANK_TAIL = "\u3002\uff0e.\uff1b;\uff0c,"
+    _BLANK_PATTERN = re.compile(r"[_\uff3f\u2014]{2,}|\uff08\s*\uff09|\(\s*\)")
+
+    def _question_materials(self, question: QuestionContent) -> list[dict[str, str]]:
+        """当前题目的参考资料：课程文本（PPT/文本资源）+ 联网搜索结果，两者合并
+
+        本地资料更贴近课程原话，排在前面；联网结果作为补充，排在后面。
+        联网结果按题目缓存，避免同一题重复搜索。
+        """
+        materials = list(self._reference_materials)
+        if self._web_search is None:
+            return materials
+
+        if question.id not in self._web_materials:
+            self._web_materials[question.id] = self._web_search.build_materials(extract_text(question.content))
+        web_materials = self._web_materials[question.id]
+        if web_materials:
+            logger.info(
+                f"参考资料合并：本地 {len(materials)} 条 + 联网 {len(web_materials)} 条（题目 {question.id}）"
+            )
+        return materials + web_materials
+
+    @staticmethod
+    def _normalize_for_match(text: str) -> str:
+        """去掉空白与引号括号，保留标点（用作句界）"""
+        return re.sub(r"[\s\u3000\u201c\u201d\"'\u2018\u2019\u300a\u300b<>()\uff08\uff09\[\]\u3010\u3011]", "", text)
+
+    def _clean_fill_blank(self, text: str) -> str:
+        """清洗单个填空答案：去首尾引号、括号、句末标点"""
+        cleaned = text.strip().strip(self._FILL_BLANK_TRIM)
+        return cleaned.rstrip(self._FILL_BLANK_TAIL).strip()
+
+    @staticmethod
+    def _reference_text(materials: list[dict[str, str]]) -> str:
+        """参考资料纯文本"""
+        return "\n".join(str(ref.get("content", "")) for ref in materials)
+
+    def _is_grounded_in_reference(self, answers: list[str], materials: list[dict[str, str]]) -> bool:
+        """答案是否都能在参考资料原文中原样找到（无参考资料时视为通过）"""
+        haystack = self._normalize_for_match(self._reference_text(materials))
+        if not haystack:
+            return True
+        for answer in answers:
+            needle = self._normalize_for_match(answer)
+            if needle and needle not in haystack:
+                return False
+        return True
+
+    def _reference_excerpt(self, question: str, materials: list[dict[str, str]], limit: int = 5) -> str:
+        """按题干预原文的字符重合度，挑出最相关的几句原文作为改写依据"""
+        text = self._reference_text(materials)
+        if not text:
+            return ""
+        key = self._normalize_for_match(re.sub(r"[_\uff3f\u2014\s]+", "", question))
+        units = [u.strip() for u in re.split(r"[\n\u3002\uff1b;]", text) if u.strip()]
+        scored: list[tuple[int, int, str]] = []
+        for idx, unit in enumerate(units):
+            normalized = self._normalize_for_match(unit)
+            hits = sum(1 for i in range(len(key) - 1) if key[i : i + 2] in normalized)
+            scored.append((hits, idx, unit))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        picked = [unit for hits, _, unit in scored[:limit] if hits > 0]
+        return "\n".join(picked)
+
+    def _split_by_blanks(self, question: str) -> list[str] | None:
+        """按空白标记切分题干；没有空白时返回 None"""
+        segments = self._BLANK_PATTERN.split(question)
+        if len(segments) < 2:
+            return None
+        return [self._normalize_for_match(segment) for segment in segments]
+
+    def _reconstruct_answers(
+        self, question: str, materials: list[dict[str, str]], max_answer_len: int = 30
+    ) -> list[str] | None:
+        """用参考资料里的原句把每个空的答案“卡”出来
+
+        作业题干通常直接摘自教材：把空白两侧的文字当锚点，在原文里定位句子，
+        两段锚点之间的原文片段就是该填的内容。既能把「经济」补成「经济高质量」，
+        也能把「人民群众」收窄成原文的「人民」。
+        """
+        segments = self._split_by_blanks(question)
+        if segments is None or any(not segment for segment in segments):
+            return None
+        haystack = self._normalize_for_match(self._reference_text(materials))
+        if not haystack:
+            return None
+
+        head = segments[0]
+        start = haystack.find(head)
+        while start != -1:
+            cursor = start + len(head)
+            picked: list[str] = []
+            matched = True
+            for nxt in segments[1:]:
+                window_end = min(len(haystack), cursor + max_answer_len)
+                offset = haystack.find(nxt, cursor, window_end)
+                if offset == -1:
+                    matched = False
+                    break
+                picked.append(haystack[cursor:offset])
+                cursor = offset + len(nxt)
+            if matched and len(picked) == len(segments) - 1 and all(picked):
+                return picked
+            start = haystack.find(head, start + 1)
+        return None
+
+    def _anchor_fill_blank(
+        self,
+        question: str,
+        answers: list[str],
+        materials: list[dict[str, str]] | None = None,
+    ) -> list[str]:
+        """把填空答案对齐到参考资料原文
+
+        模型爱给近义概括（「经济」「基础研究」「协商」），而服务端按原文用词判分。
+        优先用题干锚点在原文中还原整句（确定性，无额外模型调用）；
+        还原失败时再退回一次 LLM 改写。
+        """
+        refs = self._reference_materials if materials is None else materials
+        local = self._reference_materials
+        cleaned = [self._clean_fill_blank(answer) for answer in answers]
+        cleaned = [answer for answer in cleaned if answer]
+        if not cleaned:
+            return answers
+        if not refs:
+            return cleaned
+
+        # 还原优先用课程原文；课程原文匹配不到时再试合并资料
+        reconstructed = self._reconstruct_answers(question, local) if local else None
+        if reconstructed is None:
+            reconstructed = self._reconstruct_answers(question, refs)
+        if reconstructed is not None and len(reconstructed) == len(cleaned):
+            if reconstructed != cleaned:
+                logger.info(f"填空题答案按原文还原: {cleaned} -> {reconstructed}")
+            return reconstructed
+
+        # 改写只依据课程原文：联网摘要噪声大，实测会越改越偏
+        if not local:
+            logger.info(f"没有本地参考资料，跳过填空题改写: {cleaned}")
+            return cleaned
+        if self._provider is None:
+            logger.warning(f"填空题答案不在参考资料原文中: {cleaned}")
+            return cleaned
+
+        excerpt = self._reference_excerpt(question, local) or self._reference_excerpt(question, refs)
+        if not excerpt:
+            logger.warning(f"参考资料中找不到与题目相关的句子，填空题答案保持原样: {cleaned}")
+            return cleaned
+
+        try:
+            raw = self._provider.completion(build_fill_blank_repair_prompt(question, cleaned, excerpt))
+            repaired = [
+                self._clean_fill_blank(answer)
+                for answer in self._provider.parse_fill_blank_answer(raw, expected=len(cleaned))
+            ]
+            repaired = [answer for answer in repaired if answer]
+        except Exception as e:
+            logger.warning(f"填空题答案对齐失败，保留原答案: {e}")
+            return cleaned
+
+        if len(repaired) != len(cleaned):
+            logger.warning(f"填空题对齐后数量不一致，保留原答案: {cleaned} -> {repaired}")
+            return cleaned
+        if repaired != cleaned:
+            logger.info(f"填空题答案按原文校正: {cleaned} -> {repaired}")
+        if not self._is_grounded_in_reference(repaired, refs):
+            logger.warning(f"填空题对齐后仍不在原文中: {repaired}")
+        return repaired
 
     # --- 题库参考注入 ---
 

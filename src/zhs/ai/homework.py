@@ -51,6 +51,17 @@ class HomeworkCtx(AiExamBase):
         )
         self._knowledge_id = knowledge_id
 
+    # --- 缓存策略 ---
+
+    @property
+    def _cross_exam_search(self) -> bool:
+        """作业也启用跨 exam 课程级查询（按题干文本匹配）
+
+        每次重试都是一份新卷，题目 ID 全新；但课程题库是有限的，同一道题常以相同题干
+        出现在别的卷里。开启后可以复用之前从服务端拿到的正确答案，错题下次就能答对。
+        """
+        return True
+
     # --- API ---
 
     @property
@@ -172,6 +183,7 @@ class HomeworkCtx(AiExamBase):
         """处理单道题目（顺序执行，含延迟防限流）"""
         time.sleep(random.uniform(3, 5))
 
+        logger.info(f"作答第 {self._progress_current + 1}/{self._progress_total} 题（题目 {sheet.question_id}）")
         question = self._get_question_content(sheet.question_id, sheet.version)
         if question is None:
             logger.error(f"获取题目失败: {sheet.question_id}")

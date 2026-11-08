@@ -139,6 +139,8 @@ class OpenAIProvider(LLMProvider):
         collected: list[str] = []
         cache: str = ""
         start_time = time.monotonic()
+        # 找到答案标记后仍继续读完整个流（配置项控制），避免提前关流丢失后续内容
+        marker_found = False
 
         try:
             while True:
@@ -165,18 +167,20 @@ class OpenAIProvider(LLMProvider):
                 if content:
                     collected.append(content)
                     cache += content
-                    # 检测到答案标记后提前终止
-                    match = re.search(f"{re.escape(aim_start)}(.*?){re.escape(aim_end)}", cache, re.DOTALL)
-                    if match:
-                        logger.info("检测到答案标记，提前终止 OpenAI 流")
-                        return cache
+                    if not marker_found and re.search(
+                        f"{re.escape(aim_start)}(.*?){re.escape(aim_end)}", cache, re.DOTALL
+                    ):
+                        marker_found = True
+                        logger.info("检测到答案标记，继续读取剩余内容")
         finally:
             # 提前终止/超时/异常都要停流：否则 reader 继续读被抛弃的响应，白烧 token 与连接
             stop_event.set()
             _close_stream(stream)
 
-        # 流结束但未找到答案标记
         result = "".join(collected)
+        if marker_found and result:
+            return result
+        # 流结束但未找到答案标记
         if not result:
             logger.error("OpenAI 流响应为空，未找到答案标记")
             raise ZhsError("OpenAI 流响应为空，未找到答案标记")

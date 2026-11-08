@@ -277,7 +277,17 @@ class AiCourseManager:
         targets: list[KnowledgeTarget] = (
             [direct_target] if direct_target is not None else list(self._iter_targets(course_info))
         )
+        total_targets = len(targets)
+        # 从中间某个知识点开始时（--start-index / --start），iterator 被截断，
+        # 这里把起始偏移补回来，日志里始终显示课程内的真实序号。
+        offset = int(getattr(self, "_target_offset", 0) or 0)
+        course_total = offset + total_targets
+        if offset:
+            logger.info(f"本次处理 {total_targets} 个知识点（课程共 {course_total} 个，从第 {offset + 1} 个开始）")
+        else:
+            logger.info(f"本次共 {total_targets} 个知识点待处理")
 
+        target_index = 0
         for theme_name, group in groupby(targets, key=lambda target: target.theme_name):
             if not is_direct_mode:
                 logger.info(f"主题: {theme_name}")
@@ -285,6 +295,10 @@ class AiCourseManager:
                 self._reporter.tree_print(f"主题: {styled(theme_name, _C.CYAN)}", depth=1, enabled=True)
 
             for target in group:
+                target_index += 1
+                logger.info(
+                    f"进度 {offset + target_index}/{course_total} ｜ {theme_name} ｜ {target.knowledge.knowledge_name}"
+                )
                 if not no_homework and self._should_skip_ai_free_exam(target, homework_config):
                     self._reporter.tree_print(
                         msg_skip(f"跳过(免考): {target.knowledge.knowledge_name}"), depth=2, enabled=True
@@ -394,6 +408,7 @@ class AiCourseManager:
         exam = self.query_homework(course_id, class_id, knowledge.knowledge_id)
         homework_done = exam is None or not exam.paper_id or exam.mastery_score >= homework_config.ai_homework_threshold
         if homework_done:
+            logger.info(f"跳过(掌握度已达标): {knowledge.knowledge_name} (当前 {exam.mastery_score if exam else '无'} 分)")
             self._reporter.tree_print(
                 msg_skip(
                     f"跳过(作业已达标): {knowledge.knowledge_name} (作业={exam.mastery_score if exam else '无'}分)"
@@ -412,6 +427,7 @@ class AiCourseManager:
         # PPT 预转换：每个知识点只转换一次，缓存在内存，达标后释放
         reference_materials: list[dict[str, str]] = []
         if ppts:
+            logger.info(f"转换 {len(ppts)} 个PPT为参考资料: {knowledge.knowledge_name}")
             self._reporter.tree_print(msg_info(f"转换 {len(ppts)} 个PPT为参考资料..."), depth=3, enabled=True)
             converter = PptConverter()
             for ppt in ppts:
@@ -424,6 +440,7 @@ class AiCourseManager:
 
         # 作业循环
         tried = 0
+        logger.info(f"开始做作业: {knowledge.knowledge_name} (当前 {exam.mastery_score if exam else 0} 分)")
         while True:
             if tried > 0:
                 exam = self.query_homework(course_id, class_id, knowledge.knowledge_id)
@@ -433,14 +450,19 @@ class AiCourseManager:
                 break
 
             if not self._should_do_homework(exam, tried, False, homework_config):
+                logger.info(
+                    f"作业结束: {knowledge.knowledge_name} 当前 {exam.mastery_score} 分 "
+                    f"(阈值={homework_config.ai_homework_threshold}, 已尝试 {tried} 次)"
+                )
                 self._reporter.tree_print(
-                    msg_done(f"作业已达标: {exam.mastery_score}分 (阈值={homework_config.ai_homework_threshold})"),
+                    msg_done(f"作业结束: {exam.mastery_score}分 (阈值={homework_config.ai_homework_threshold})"),
                     depth=3,
                     enabled=True,
                 )
                 break
 
             tried += 1
+            logger.info(f"第 {tried} 次尝试: {knowledge.knowledge_name} (当前 {exam.mastery_score} 分)")
             self._reporter.print()
             self._reporter.print(styled("-" * 40, _C.DIM))
             self._reporter.tree_print(
