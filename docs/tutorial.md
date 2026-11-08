@@ -1,0 +1,623 @@
+# ZHS 使用教程
+
+> 本文档介绍 ZHS（智慧树自动刷课工具）的安装、配置、登录和各命令的使用方式。
+> ZHS 使用命令式 CLI 接口，支持知到 / Hike / AI 三类课程的视频刷课、作业、考试。
+
+---
+
+## 1. 安装
+
+### 1.1 前置要求
+
+- Python ≥ 3.13
+- [uv](https://docs.astral.sh/uv/) 包管理器（推荐）或 pip
+
+### 1.2 安装步骤
+
+```bash
+# 克隆仓库
+git clone <repo-url>
+cd ZHS
+
+# 使用 uv 安装依赖（含开发依赖）
+uv sync --dev
+
+# 开发依赖写在 [dependency-groups] dev；没有 pip 的 `[dev]` extra
+```
+
+安装完成后，`zhs` 命令即可用：
+
+```bash
+zhs --help
+```
+
+---
+
+## 2. 初始化与配置
+
+### 2.1 初始化数据目录
+
+首次使用必须运行 `zhs init` 创建数据目录和默认配置：
+
+```bash
+zhs init
+```
+
+输出示例：
+
+```
+配置文件已创建: ~/.zhs/config.toml
+数据目录: ~/.zhs
+```
+
+数据目录结构：
+
+```
+~/.zhs/
+├── config.toml       # 配置文件
+├── cookies.json      # 登录 Cookie（登录后生成）
+├── execution.json    # 课程列表（zhs fetch 生成）
+├── cache/            # 答案缓存目录（SQLite）
+│   └── questions_bank.db  # 题库数据库（zhidao_questions + ai_questions 两张表）
+└── logs/             # 日志目录（10 MB 轮转，保留 7 天，zip 压缩）
+```
+
+### 2.2 配置文件说明
+
+配置文件位于 `~/.zhs/config.toml`，使用 TOML 格式，按功能分组：
+
+```toml
+# ===== 顶层基础设置 =====
+save_cookies = true              # 保存 Cookie，避免重复登录
+limit = 0                        # 刷课时间限制（分钟），0 = 不限制
+threshold = 0.91                 # 视频完成阈值（0.0-1.0）
+
+# ===== 视频播放速度 =====
+[video]
+zhidao_speed = 1.5               # 知到视频速度（最高 2.0）
+hike_speed = 1.25                # Hike 视频速度（最高 2.0）
+ai_speed = 1.5                   # AI 课程视频速度（最高 2.0）
+
+# ===== 作业配置 =====
+[homework]
+threshold = 100                  # 作业达标阈值（0-100，默认 100）
+max_submit = 0                   # 最大重做次数（0 = 无限次）
+homework_delay_min = 1.0         # 每题保存后最小休息时间（秒）
+homework_delay_max = 2.0         # 每题保存后最大休息时间（秒）
+homework_page_size = 100         # 扫描作业列表分页大小
+ai_homework_threshold = 90       # AI 课程作业跳过阈值（masteryScore > 此值则跳过）
+
+# ===== 显示设置 =====
+[display]
+log_level = "INFO"               # 日志级别: DEBUG/INFO/WARNING/ERROR
+
+# ===== 代理设置 =====
+[proxies]
+http = ""                        # HTTP 代理地址
+https = ""                       # HTTPS 代理地址
+
+# ===== 二维码设置 =====
+[qr]
+image_path = ""                  # 二维码图片保存路径（留空则使用临时目录）
+
+# ===== AI 配置 =====
+[ai]
+enabled = true                   # 是否启用 AI 功能
+use_builtin_ai = true            # 仅 AI 智慧课程：是否使用智慧树内置 AI（无需 API Key）
+api_key = ""                     # OpenAI 兼容 API Key（自定义 AI 时需要）
+base_url = "https://api.openai.com/v1"  # API 地址
+model = "gpt-4o-mini"            # 模型名称
+max_token = 27900                # 最大 Token 数
+
+# ===== AI 考试配置 =====
+[exam]
+save_nums = 5                    # 每批保存答案的题目数量
+delay_min = 3.0                  # 每批保存后最小休息时间（秒）
+delay_max = 5.0                  # 每批保存后最大休息时间（秒）
+
+# ===== 加密密钥（一般无需修改） =====
+[crypto]
+iv = "1g3qqdh4jvbskb9x"
+home_key = "7q9oko0vqb3la20r"
+video_key = "azp53h0kft7qi78q"
+qa_key = "kcGOlISPkYKRksSK"
+ai_key = "hw2fdlwcj4cs1mx7"
+exam_key = "onbfhdyvz8x7otrp"
+hike_salt = "o6xpt3b#Qy$Z"
+ev_key = "zzpttjd"
+ai_sign_prefix = "8ZflKEagfL"
+
+# ===== API URL（一般无需修改） =====
+[urls]
+base = "https://onlineservice-api.zhihuishu.com"
+passport = "https://passport.zhihuishu.com"
+study = "https://studyservice-api.zhihuishu.com"
+hike = "https://hike.zhihuishu.com"
+ai = "https://kg-ai-run.zhihuishu.com"
+ai_task = "https://kg-run-student.zhihuishu.com"
+exam = "https://studentexamtest.zhihuishu.com"
+homework = "https://studentexam-api.zhihuishu.com"
+ai_analysis = "https://ai-course-assistant-api.zhihuishu.com"
+newbase = "https://newbase.zhihuishu.com"
+```
+
+### 2.3 AI 配置说明
+
+ZHS 的 AI 答题按课程类型分成两条链路：
+
+| 课程类型 | 使用的 AI | 说明 |
+|------|------|----------|
+| **AI 智慧课程**（`learnPage` / AI 考试） | `use_builtin_ai = true`（默认）→ 智慧树内置 AI；`false` → 自定义 LLM | 内置 AI 无需 API Key，但**前提是账号里有 AI 智慧课程** |
+| **知到作业 / 知到考试** | **只能用自定义 LLM** | 没有内置 AI 可用，必须配置 `api_key`（+ `base_url`）；`use_builtin_ai` 对其不生效 |
+
+> 智慧树内置 AI 只服务 AI 智慧课程，且指令遵从性较差，建议使用自定义 LLM：`use_builtin_ai = false` + `api_key` + `base_url`。
+> 知到作业/考试没有内置 AI 可用（非 AI 课程的 `get-course-mapUid` 实测返回 500），未配置 `api_key` 时只会用题库/随机答案。
+
+---
+
+## 3. 登录
+
+ZHS 仅支持**扫码登录**，使用 `zhs login` 命令：
+
+```bash
+zhs login
+```
+
+程序会：
+
+1. 生成二维码图片并保存到 `~/.zhs/qrcode.png`（或配置文件指定的路径）
+2. 等待手机智慧树 APP 扫码确认
+3. 登录成功后自动保存 Cookie
+
+### 3.1 终端显示二维码
+
+如果无法打开图片查看器，可在终端直接显示：
+
+```bash
+zhs login --show-in-terminal
+```
+
+### 3.2 指定二维码保存路径
+
+```bash
+zhs login --image-path /path/to/qrcode.png
+```
+
+### 3.3 通过代理登录
+
+```bash
+zhs login --proxy http://127.0.0.1:7890
+```
+
+登录成功后，Cookie 会自动保存到 `~/.zhs/cookies.json`，后续命令无需重复登录。
+
+---
+
+## 4. 命令总览
+
+ZHS 使用命令式 CLI 接口，所有命令通过 `zhs <command>` 调用：
+
+| 命令 | 用途 | 示例 |
+|------|------|------|
+| `zhs init` | 初始化数据目录与配置 | `zhs init` |
+| `zhs login` | 扫码登录 | `zhs login` |
+| `zhs play` | 刷视频（知到/Hike/AI） | `zhs play -c 1000008156` |
+| `zhs homework` | 写作业（知到/AI） | `zhs homework -c 1000008156` |
+| `zhs exam` | AI 课程考试 | `zhs exam --ai-course 1001 --ai-class 2001` |
+| `zhs fetch` | 获取课程列表 | `zhs fetch` |
+
+查看帮助：
+
+```bash
+zhs --help              # 查看所有命令
+zhs play --help         # 查看某个命令的参数
+```
+
+---
+
+## 5. 刷视频：`zhs play`
+
+### 5.1 全刷模式（默认）
+
+不指定课程 ID 时，自动刷所有课程（先知到 → Hike → AI）：
+
+```bash
+zhs play
+```
+
+### 5.2 刷指定知到课程
+
+`-c` 传知到课程的**数字 courseId**（如 `1000008156`），程序会反查课程所需的 `recruitAndCourseId`：
+
+```bash
+zhs play -c 1000008156 --type zhidao
+```
+
+> `recruitAndCourseId`（形如 `ABC123` 的字符串）只能通过 `--url` 传入，不能用于 `-c`。
+
+### 5.3 刷指定 Hike 课程
+
+Hike 课程 ID 通常为纯数字（如 `12345`）：
+
+```bash
+zhs play -c 12345
+```
+
+### 5.4 刷 AI 课程
+
+AI 课程需要提供 `courseId` 和 `classId`：
+
+```bash
+zhs play --ai-course 1001 --ai-class 2001
+```
+
+也可使用 `courseId:classId` 字符串格式（与其他课程统一）：
+
+```bash
+zhs play -c 1001:2001 --type ai
+```
+
+### 5.5 强制指定课程类型
+
+当自动检测不准确时，可手动指定 `--type`：
+
+```bash
+# 强制按知到课程处理
+zhs play -c 1000008156 --type zhidao
+
+# 强制按 Hike 课程处理
+zhs play -c 12345 --type hike
+
+# 强制按 AI 课程处理
+zhs play -c 1001:2001 --type ai
+
+# 仅刷某一类课程（全刷模式下过滤）
+zhs play --type zhidao
+```
+
+课程类型自动检测规则：
+
+- 显式 `--type` 优先级最高
+- ID 含冒号（`courseId:classId`）→ AI 课程
+- ID 含字母 → 知到（zhidao）
+- ID 纯数字 → 先匹配知到课程列表，命中则知到，否则 Hike
+- AI 课程也可通过 `--ai-course`/`--ai-class` 指定
+
+### 5.6 通过 URL 刷课
+
+从浏览器复制的 URL 可直接传入 `--url`（与 `-c` 互斥），自动解析课程参数：
+
+```bash
+# 知到视频页（扫描模式全刷）
+zhs play --url "https://studyvideoh5.zhihuishu.com/stuStudy?recruitAndCourseId=xxx"
+
+# AI 学习页（直接模式，只刷该知识点）
+zhs play --url "https://ai-smart-course-student-pro.zhihuishu.com/learnPage/{courseId}/{nodeUid}/{classId}"
+
+# AI 课程页（扫描模式全刷）
+zhs play --url "https://ai-smart-course-student-pro.zhihuishu.com/singleCourse/knowledgeStudy/{courseId}/{classId}"
+```
+
+> `--url` 按命令分层解析，不依赖域名前缀。AI 学习页 URL 含 `nodeUid` 时走**直接模式**（只刷该知识点），AI 课程页 `knowledgeStudy` 走**扫描模式**（全刷课程）。
+
+### 5.7 覆盖配置参数
+
+```bash
+# 指定播放速度（覆盖 config.toml 中的 video.*_speed）
+zhs play -c 1000008156 -s 1.5
+
+# 限制每门课程刷课时间（分钟）
+zhs play -c 1000008156 -l 30
+```
+
+---
+
+## 6. 写作业：`zhs homework`
+
+### 6.1 全刷作业模式
+
+扫描所有知到课程和 AI 课程的作业：
+
+```bash
+zhs homework
+```
+
+### 6.2 按课程 ID 写作业
+
+```bash
+# 知到课程作业
+zhs homework -c 1000008156
+
+# AI 课程作业
+zhs homework --ai-course 1001 --ai-class 2001
+```
+
+### 6.3 通过 URL 写指定作业
+
+从浏览器复制的 URL 可直接传入 `--url`（与 `-c` 互斥），支持三类 URL：
+
+```bash
+# 知到作业页（直接做该作业）
+zhs homework --url "https://onlineexamh5new.zhihuishu.com/stuExamWeb.html#/webExamList/dohomework/{recruitId}/{stuExamId}/{examId}/{courseId}/{schoolId}/0"
+
+# AI 学习页（直接模式，只做该知识点作业）
+zhs homework --url "https://ai-smart-course-student-pro.zhihuishu.com/learnPage/{courseId}/{nodeUid}/{classId}"
+
+# AI 课程页（扫描模式，全刷课程作业）
+zhs homework --url "https://ai-smart-course-student-pro.zhihuishu.com/singleCourse/knowledgeStudy/{courseId}/{classId}"
+```
+
+知到作业 URL 参数顺序为：`recruitId / stuExamId / examId / courseId / schoolId`。
+AI 学习页 URL 含 `nodeUid` 时走**直接模式**（只做该知识点作业），AI 课程页走**扫描模式**（全刷）。
+
+### 6.4 作业参数
+
+```bash
+# 不使用 AI 模型（随机生成答案）
+zhs homework -c 1000008156 --no-ai
+
+# 指定达标阈值百分比（0-100，默认 100）
+zhs homework -c 1000008156 --homework-threshold 80
+
+# 指定最大重做次数（0 = 无限次）
+zhs homework -c 1000008156 --max-submit 3
+```
+
+---
+
+## 7. 课程考试：`zhs exam`
+
+> 支持 AI 课程与知到课程：`--type ai` / `--type zhidao` / `--type auto`。
+
+### 7.1 基本用法
+
+```bash
+# 指定 AI 课程考试（答题但不提交）
+zhs exam --ai-course 1001 --ai-class 2001
+
+# 答题并提交考试
+zhs exam --ai-course 1001 --ai-class 2001 --submit
+```
+
+### 7.2 全部 AI 课程考试
+
+```bash
+zhs exam --type ai
+```
+
+### 7.3 通过 URL 直接做某场考试
+
+从浏览器复制考试详情页 URL（`testDetail/...`），直接做该场考试：
+
+```bash
+zhs exam --url "https://ai-smart-course-student-pro.zhihuishu.com/testDetail/{courseId}/{classId}/{examTestId}/{examPaperId}/..."
+```
+
+URL 参数顺序为：`courseId / classId / examTestId / examPaperId`。
+
+### 7.4 提交说明
+
+- **不提交**（默认）：仅答题并保存到缓存，可重复运行。
+- **提交**（`--submit`）：答题后提交考试，提交后无法修改。提交成功后会尝试保存答案到缓存供后续参考。
+
+---
+
+## 8. 获取课程列表：`zhs fetch`
+
+```bash
+# 获取所有课程列表（知到 + Hike + AI）
+zhs fetch
+
+# 仅获取课程列表（不扫描作业）
+zhs fetch --type course
+```
+
+课程列表会保存到 `~/.zhs/execution.json`，包含课程名称和 ID：
+
+```json
+{
+  "zhidao": [{"name": "课程名", "id": "1000008156"}],
+  "hike": [{"name": "课程名", "id": "12345"}],
+  "ai": [{"name": "课程名", "courseId": "1001", "classId": "2001"}]
+}
+```
+
+---
+
+## 9. 通用参数
+
+以下参数适用于 `play` / `homework` / `exam` / `fetch` 命令：
+
+| 参数 | 说明 |
+|------|------|
+| `--proxy <url>` | 代理地址（如 `http://127.0.0.1:7890`、`socks5://127.0.0.1:1080`） |
+| `-d, --debug` | 调试模式（输出 DEBUG 级别日志） |
+| `--console-log` | 日志输出到控制台（默认仅写入文件） |
+
+查看版本号（全局选项，无需子命令）：
+
+```bash
+zhs --version   # 或 zhs -v，输出形如 zhs 0.1.4.3
+```
+
+`play` / `homework` / `exam` 共有参数：
+
+| 参数 | 说明 |
+|------|------|
+| `-c, --course <id>` | 课程 ID（可多次指定） |
+| `--type <type>` | 课程类型：`zhidao` / `hike` / `ai` / `auto` |
+| `--ai-course <id>` | AI 课程 courseId |
+| `--ai-class <id>` | AI 课程 classId |
+
+---
+
+## 10. 使用示例
+
+```bash
+# 首次使用：初始化 + 登录
+zhs init
+zhs login
+
+# 获取课程列表，查看有哪些课程
+zhs fetch
+
+# 刷单个知到课程，1.5 倍速
+zhs play -c 1000008156 -s 1.5
+
+# 刷单个 Hike 课程，限制 30 分钟
+zhs play -c 12345 -l 30
+
+# 刷 AI 课程（视频 + 作业）
+zhs play --ai-course 1001 --ai-class 2001
+
+# 全刷所有课程
+zhs play
+
+# 仅刷知到课程
+zhs play --type zhidao
+
+# 写知到课程作业
+zhs homework -c 1000008156
+
+# 通过 URL 写指定作业
+zhs homework --url "https://onlineexamh5new.zhihuishu.com/..."
+
+# AI 课程考试并提交
+zhs exam --ai-course 1001 --ai-class 2001 --submit
+
+# 使用代理 + 调试模式
+zhs play -c 1000008156 --proxy http://127.0.0.1:7890 -d --console-log
+```
+
+---
+
+## 11. 代理支持
+
+支持以下代理协议：
+
+```bash
+# HTTP/HTTPS 代理
+zhs play --proxy http://127.0.0.1:7890
+
+# SOCKS5 代理
+zhs play --proxy socks5://127.0.0.1:1080
+
+# 全协议代理
+zhs play --proxy all://127.0.0.1:7890
+```
+
+也可在 `config.toml` 中配置：
+
+```toml
+[proxies]
+http = "http://127.0.0.1:7890"
+https = "http://127.0.0.1:7890"
+```
+
+命令行 `--proxy` 参数优先级高于配置文件。
+
+---
+
+## 12. 数据目录
+
+程序数据默认保存在 `~/.zhs/` 目录：
+
+| 文件/目录 | 说明 |
+|----------|------|
+| `config.toml` | 配置文件（`zhs init` 生成） |
+| `cookies.json` | 登录 Cookie（`zhs login` 生成） |
+| `execution.json` | 课程列表（`zhs fetch` 生成） |
+| `cache/questions_bank.db` | 题库缓存数据库（SQLite，含 `zhidao_questions` + `ai_questions` 两张表） |
+| `logs/` | 日志目录（按 10 MB 轮转，保留 7 天，zip 压缩） |
+| `qrcode.png` | 登录二维码图片（`zhs login` 生成） |
+
+> **缓存存储**：答案缓存统一存储于 SQLite 数据库 `~/.zhs/cache/questions_bank.db`。可通过 `zhs cache export -c COURSE_ID` 导出为 JSON 分享，`zhs cache import PATH` 导入。从旧版 JSON 缓存升级时，运行 `uv run python scripts/migrate_cache.py --dry-run` 预览，确认后去掉 `--dry-run` 执行迁移。
+
+---
+
+## 13. 常见问题
+
+### Q1: 登录二维码扫不了？
+
+- 尝试 `zhs login --show-in-terminal` 在终端直接显示二维码
+- 或指定 `--image-path` 保存到自定义路径后手动打开
+- 检查网络连接，必要时使用代理：`zhs login --proxy http://...`
+
+### Q2: 课程类型检测错误？
+
+使用 `--type` 参数手动指定：
+
+```bash
+zhs play -c 1000008156 --type zhidao    # 强制按知到处理
+zhs play -c 12345 --type hike           # 强制按 Hike 处理
+zhs play -c 1001:2001 --type ai         # 强制按 AI 处理
+```
+
+### Q3: AI 答题报错？
+
+- **知到作业/考试**：必须配置 `ai.api_key`（+ `base_url`），没有内置 AI 可用；未配置时只用题库/随机答案
+- **AI 智慧课程**：默认使用智慧树内置 AI（需账号内有 AI 智慧课程）；想用自己的模型请设 `ai.use_builtin_ai = false`
+- 完全禁用 AI（随机答题）：`zhs homework -c 1000008156 --no-ai`
+
+### Q4: 视频播放卡住？
+
+- 检查网络连接
+- 尝试使用代理：`zhs play --proxy ...`
+- 开启调试模式查看详细日志：`zhs play -c 1000008156 -d --console-log`
+- 查看日志文件：`~/.zhs/logs/zhs_YYYY-MM-DD.log`
+
+### Q5: Cookie 过期？
+
+重新登录：
+
+```bash
+# 重新登录
+zhs login
+```
+
+### Q6: 如何只刷视频不答题？
+
+`zhs play` 只刷视频、`zhs homework` 只做作业，两者已分离（`play` 内部以 `no_homework=True` 运行）：
+
+- 知到课程：`zhs play` 刷视频，`zhs homework` 写作业
+- AI 课程：`zhs play --ai-course X --ai-class Y` 只刷知识点，`zhs homework` 做作业
+
+> 作业默认跳过免考知识点（`freeExam=1`）；设 `[homework] skip_ai_free_exam = false` 可关闭。
+
+### Q7: 作业如何达标？
+
+- 默认达标阈值 100%（`homework.threshold = 100`）
+- 未达标会自动重做，直到达标或达到 `max_submit` 次数
+- 可通过 `--homework-threshold` 调整阈值，或 `--max-submit` 限制重做次数
+
+### Q8: 考试如何提交？
+
+- 默认不提交：`zhs exam --ai-course X --ai-class Y`（仅答题，可重复运行）
+- 提交考试：`zhs exam --ai-course X --ai-class Y --submit`（提交后无法修改）
+
+### Q9: 日志在哪里？
+
+- 日志文件：`~/.zhs/logs/zhs_YYYY-MM-DD.log`（按 10 MB 轮转，保留 7 天，zip 压缩）
+- 控制台输出：默认不输出，使用 `--console-log` 或 `-d` 开启
+
+### Q10: 如何查看课程 ID？
+
+```bash
+# 获取所有课程列表
+zhs fetch
+
+# 查看 execution.json
+cat ~/.zhs/execution.json
+```
+
+知到 / Hike 课程 ID 均为纯数字（如 `1000008156` / `12345`），AI 课程需要 `courseId` 和 `classId` 两个参数（`-c courseId:classId`）。知到视频页 URL 中的 `recruitAndCourseId`（形如 `ABC123`）只能通过 `--url` 传入。
+
+### Q11: 遇到"需要验证码，停止课程"怎么办？
+
+这是服务端风控触发的滑块验证码（API 返回 `code: -12`），**不是登录失效**。程序按设计停下、交给人工处理，不会自动过验证码。
+
+处理步骤：
+
+1. 打开智慧树网页版（`studyvideoh5.zhihuishu.com`）或 APP，进入**被拦的那门课程**，按提示完成滑块验证；
+2. 回到命令行**直接重新运行 `zhs play`**——沿用原来的 Cookie 即可，**不需要 `zhs login` 重新扫码**；
+

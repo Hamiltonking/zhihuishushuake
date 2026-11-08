@@ -1,0 +1,601 @@
+"""Task 1.6 — config.py 测试"""
+
+import json
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from zhs.config import (
+    DEFAULT_STREAM_IDLE_TIMEOUT,
+    DEFAULT_STREAM_TIMEOUT,
+    AIConfig,
+    AppConfig,
+    ConfigManager,
+    CryptoConfig,
+    ExamConfig,
+    HomeworkConfig,
+    QuestionBankConfig,
+    UrlConfig,
+)
+
+# ---------------------------------------------------------------------------
+# CryptoConfig
+# ---------------------------------------------------------------------------
+
+
+class TestCryptoConfig:
+    def test_default_values(self) -> None:
+        c = CryptoConfig()
+        assert c.iv == "1g3qqdh4jvbskb9x"
+        assert c.video_key == "azp53h0kft7qi78q"
+        assert c.home_key == "7q9oko0vqb3la20r"
+        assert c.qa_key == "kcGOlISPkYKRksSK"
+        assert c.exam_key == "onbfhdyvz8x7otrp"
+        assert c.ai_key == "hw2fdlwcj4cs1mx7"
+        assert c.hike_salt == "o6xpt3b#Qy$Z"
+        assert c.ev_key == "zzpttjd"
+        assert c.ai_sign_prefix == "8ZflKEagfL"
+
+    def test_key_bytes_video_key(self) -> None:
+        c = CryptoConfig()
+        assert c.key_bytes("video_key") == b"azp53h0kft7qi78q"
+
+    def test_key_bytes_iv(self) -> None:
+        c = CryptoConfig()
+        assert c.key_bytes("iv") == b"1g3qqdh4jvbskb9x"
+
+    def test_key_bytes_home_key(self) -> None:
+        c = CryptoConfig()
+        assert c.key_bytes("home_key") == b"7q9oko0vqb3la20r"
+
+    def test_key_bytes_invalid_field(self) -> None:
+        c = CryptoConfig()
+        with pytest.raises(AttributeError):
+            c.key_bytes("nonexistent_key")
+
+    def test_custom_values(self) -> None:
+        c = CryptoConfig(iv="customiv12345678", video_key="customkey1234567")
+        assert c.iv == "customiv12345678"
+        assert c.video_key == "customkey1234567"
+        assert c.key_bytes("iv") == b"customiv12345678"
+
+
+# ---------------------------------------------------------------------------
+# UrlConfig
+# ---------------------------------------------------------------------------
+
+
+class TestUrlConfig:
+    def test_default_values(self) -> None:
+        u = UrlConfig()
+        assert u.base == "https://onlineservice-api.zhihuishu.com"
+        assert u.passport == "https://passport.zhihuishu.com"
+        assert u.study == "https://studyservice-api.zhihuishu.com"
+        assert u.hike == "https://hike.zhihuishu.com"
+        assert u.ai == "https://kg-ai-run.zhihuishu.com"
+
+    def test_custom_values(self) -> None:
+        u = UrlConfig(base="http://localhost:8080")
+        assert u.base == "http://localhost:8080"
+        assert u.passport == "https://passport.zhihuishu.com"  # 默认值不变
+
+
+# ---------------------------------------------------------------------------
+# AIConfig
+# ---------------------------------------------------------------------------
+
+
+class TestAIConfig:
+    def test_default_values(self) -> None:
+        ai = AIConfig()
+        assert ai.api_key == ""
+        assert ai.base_url == "https://api.openai.com/v1"
+        assert ai.model == "gpt-4o-mini"
+        assert ai.max_token == 27900
+
+    def test_custom_values(self) -> None:
+        ai = AIConfig(api_key="sk-test", model="deepseek-v4-pro")
+        assert ai.api_key == "sk-test"
+        assert ai.model == "deepseek-v4-pro"
+
+
+# ---------------------------------------------------------------------------
+# ExamConfig
+# ---------------------------------------------------------------------------
+
+
+class TestExamConfig:
+    def test_default_values(self) -> None:
+        e = ExamConfig()
+        assert e.save_nums == 5
+        assert e.delay_min == 3.0
+        assert e.delay_max == 5.0
+
+    def test_custom_values(self) -> None:
+        e = ExamConfig(save_nums=1, delay_min=1.0, delay_max=2.0)
+        assert e.save_nums == 1
+        assert e.delay_min == 1.0
+        assert e.delay_max == 2.0
+
+
+# ---------------------------------------------------------------------------
+# QuestionBankConfig
+# ---------------------------------------------------------------------------
+
+
+class TestQuestionBankConfig:
+    def test_default_values(self) -> None:
+        qb = QuestionBankConfig()
+        assert qb.enabled is False
+        assert qb.token == ""
+        assert qb.query_url == "https://tk.enncy.cn/query"
+        assert qb.info_url == "https://tk.enncy.cn/info"
+        assert qb.scopes == ["zhidao_exam", "ai_exam"]
+
+    def test_custom_values(self) -> None:
+        qb = QuestionBankConfig(
+            enabled=True,
+            token="test-token",
+            query_url="https://example.com/q",
+            info_url="https://example.com/i",
+            scopes=["zhidao_homework", "ai_homework"],
+        )
+        assert qb.enabled is True
+        assert qb.token == "test-token"
+        assert qb.query_url == "https://example.com/q"
+        assert qb.info_url == "https://example.com/i"
+        assert qb.scopes == ["zhidao_homework", "ai_homework"]
+
+    def test_scopes_all_valid_values(self) -> None:
+        qb = QuestionBankConfig(scopes=["zhidao_homework", "zhidao_exam", "ai_homework", "ai_exam"])
+        assert qb.scopes == ["zhidao_homework", "zhidao_exam", "ai_homework", "ai_exam"]
+
+    def test_invalid_scope_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            QuestionBankConfig(scopes=["invalid_scope"])
+
+    def test_empty_scopes(self) -> None:
+        qb = QuestionBankConfig(scopes=[])
+        assert qb.scopes == []
+
+
+# ---------------------------------------------------------------------------
+# AppConfig
+# ---------------------------------------------------------------------------
+
+
+class TestAppConfig:
+    def test_defaults(self) -> None:
+        cfg = AppConfig()
+        assert cfg.save_cookies is True
+        assert cfg.video.zhidao_speed == 1.5
+        assert cfg.video.hike_speed == 1.25
+        assert cfg.display.log_level == "INFO"
+        assert cfg.proxies.to_dict() == {}
+        assert isinstance(cfg.crypto, CryptoConfig)
+        assert isinstance(cfg.urls, UrlConfig)
+        assert isinstance(cfg.ai, AIConfig)
+        assert isinstance(cfg.exam, ExamConfig)
+        assert cfg.exam.save_nums == 5
+
+    def test_custom_values(self) -> None:
+        cfg = AppConfig(save_cookies=False)
+        cfg.display.log_level = "DEBUG"
+        assert cfg.save_cookies is False
+        assert cfg.display.log_level == "DEBUG"
+
+    def test_nested_crypto_override(self) -> None:
+        cfg = AppConfig(crypto=CryptoConfig(iv="customiv12345678"))
+        assert cfg.crypto.iv == "customiv12345678"
+        assert cfg.crypto.video_key == "azp53h0kft7qi78q"  # 默认值不变
+
+    def test_nested_urls_override(self) -> None:
+        cfg = AppConfig(urls=UrlConfig(base="http://localhost:8080"))
+        assert cfg.urls.base == "http://localhost:8080"
+
+    def test_nested_ai_override(self) -> None:
+        cfg = AppConfig(ai=AIConfig(api_key="sk-test", model="gpt-4"))
+        assert cfg.ai.api_key == "sk-test"
+        assert cfg.ai.model == "gpt-4"
+
+    def test_nested_question_bank_override(self) -> None:
+        cfg = AppConfig(question_bank=QuestionBankConfig(enabled=True, token="tok-123"))
+        assert cfg.question_bank.enabled is True
+        assert cfg.question_bank.token == "tok-123"
+        assert cfg.question_bank.scopes == ["zhidao_exam", "ai_exam"]  # 默认值不变
+
+
+# ---------------------------------------------------------------------------
+# HomeworkConfig — 免考跳过配置
+# ---------------------------------------------------------------------------
+
+
+class TestHomeworkConfig:
+    def test_skip_ai_free_exam_defaults_true(self) -> None:
+        """默认跳过免考知识点"""
+        assert HomeworkConfig().skip_ai_free_exam is True
+
+    def test_skip_ai_free_exam_can_be_disabled(self) -> None:
+        """可显式关闭"""
+        assert HomeworkConfig(skip_ai_free_exam=False).skip_ai_free_exam is False
+
+
+# ---------------------------------------------------------------------------
+# ConfigManager — TOML 加载
+# ---------------------------------------------------------------------------
+
+
+class TestConfigManagerLoad:
+    def test_load_toml(self, tmp_path: Path) -> None:
+        """从 TOML 文件加载配置"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+save_cookies = false
+"""
+        )
+        mgr = ConfigManager(config_file)
+        cfg = mgr.load()
+        assert cfg.save_cookies is False
+
+    def test_load_missing_file_returns_defaults(self, tmp_path: Path) -> None:
+        """配置文件不存在时返回默认值"""
+        config_file = tmp_path / "nonexistent.toml"
+        mgr = ConfigManager(config_file)
+        cfg = mgr.load()
+        assert cfg.save_cookies is True
+        assert isinstance(cfg.crypto, CryptoConfig)
+
+    def test_load_missing_fields_use_defaults(self, tmp_path: Path) -> None:
+        """缺失字段使用默认值"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+speed = 1.5
+"""
+        )
+        mgr = ConfigManager(config_file)
+        cfg = mgr.load()
+        assert cfg.video.zhidao_speed == 1.5
+        assert cfg.video.hike_speed == 1.25
+        assert cfg.save_cookies is True  # 默认值
+
+    def test_load_skip_ai_free_exam_from_toml(self, tmp_path: Path) -> None:
+        """[homework] 的 skip_ai_free_exam 经白名单生效，防止配置静默失效"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+[homework]
+skip_ai_free_exam = false
+"""
+        )
+        cfg = ConfigManager(config_file).load()
+        assert cfg.homework.skip_ai_free_exam is False
+
+    def test_missing_skip_ai_free_exam_uses_default(self, tmp_path: Path) -> None:
+        """[homework] 未写该字段时使用默认 true"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+[homework]
+threshold = 80
+"""
+        )
+        cfg = ConfigManager(config_file).load()
+        assert cfg.homework.threshold == 80
+        assert cfg.homework.skip_ai_free_exam is True
+
+    def test_load_crypto_section(self, tmp_path: Path) -> None:
+        """加载 crypto 子配置"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+[crypto]
+iv = "customiv12345678"
+video_key = "customkey1234567"
+"""
+        )
+        mgr = ConfigManager(config_file)
+        cfg = mgr.load()
+        assert cfg.crypto.iv == "customiv12345678"
+        assert cfg.crypto.video_key == "customkey1234567"
+        assert cfg.crypto.home_key == "7q9oko0vqb3la20r"  # 默认值
+
+    def test_load_urls_section(self, tmp_path: Path) -> None:
+        """加载 urls 子配置"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+[urls]
+base = "http://localhost:8080"
+"""
+        )
+        mgr = ConfigManager(config_file)
+        cfg = mgr.load()
+        assert cfg.urls.base == "http://localhost:8080"
+
+    def test_load_ai_section(self, tmp_path: Path) -> None:
+        """加载 ai 子配置"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+[ai]
+api_key = "sk-test"
+model = "deepseek-v4-pro"
+max_token = 16000
+"""
+        )
+        mgr = ConfigManager(config_file)
+        cfg = mgr.load()
+        assert cfg.ai.api_key == "sk-test"
+        assert cfg.ai.model == "deepseek-v4-pro"
+        assert cfg.ai.max_token == 16000
+
+    def test_load_question_bank_section(self, tmp_path: Path) -> None:
+        """加载 question_bank 子配置"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+[question_bank]
+enabled = true
+token = "tok-abc"
+query_url = "https://example.com/q"
+info_url = "https://example.com/i"
+scopes = ["ai_exam", "ai_homework"]
+"""
+        )
+        mgr = ConfigManager(config_file)
+        cfg = mgr.load()
+        assert cfg.question_bank.enabled is True
+        assert cfg.question_bank.token == "tok-abc"
+        assert cfg.question_bank.query_url == "https://example.com/q"
+        assert cfg.question_bank.info_url == "https://example.com/i"
+        assert cfg.question_bank.scopes == ["ai_exam", "ai_homework"]
+
+    def test_load_question_bank_defaults(self, tmp_path: Path) -> None:
+        """question_bank 段缺失时使用默认值"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("save_cookies = false\n")
+        mgr = ConfigManager(config_file)
+        cfg = mgr.load()
+        assert cfg.question_bank.enabled is False
+        assert cfg.question_bank.token == ""
+        assert cfg.question_bank.scopes == ["zhidao_exam", "ai_exam"]
+
+    def test_load_proxies(self, tmp_path: Path) -> None:
+        """加载代理配置"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+[proxies]
+http = "http://127.0.0.1:8080"
+"""
+        )
+        mgr = ConfigManager(config_file)
+        cfg = mgr.load()
+        assert cfg.proxies.to_dict() == {"http": "http://127.0.0.1:8080"}
+
+
+# ---------------------------------------------------------------------------
+# ConfigManager — TOML 保存
+# ---------------------------------------------------------------------------
+
+
+class TestConfigManagerSave:
+    def test_save_and_load_roundtrip(self, tmp_path: Path) -> None:
+        """保存后重新加载一致"""
+        config_file = tmp_path / "config.toml"
+        cfg = AppConfig(save_cookies=False)
+        cfg.video.zhidao_speed = 1.5
+        mgr = ConfigManager(config_file)
+        mgr.save(cfg)
+        loaded = mgr.load()
+        assert loaded.save_cookies is False
+        assert loaded.video.zhidao_speed == 1.5
+
+    def test_save_creates_file(self, tmp_path: Path) -> None:
+        """保存时创建文件"""
+        config_file = tmp_path / "config.toml"
+        cfg = AppConfig()
+        mgr = ConfigManager(config_file)
+        mgr.save(cfg)
+        assert config_file.exists()
+
+    def test_save_preserves_nested_config(self, tmp_path: Path) -> None:
+        """保存和加载保留嵌套配置"""
+        config_file = tmp_path / "config.toml"
+        cfg = AppConfig(
+            crypto=CryptoConfig(iv="customiv12345678"),
+            urls=UrlConfig(base="http://localhost:8080"),
+            ai=AIConfig(api_key="sk-test", model="gpt-4"),
+        )
+        mgr = ConfigManager(config_file)
+        mgr.save(cfg)
+        loaded = mgr.load()
+        assert loaded.crypto.iv == "customiv12345678"
+        assert loaded.urls.base == "http://localhost:8080"
+        assert loaded.ai.api_key == "sk-test"
+        assert loaded.ai.model == "gpt-4"
+
+    def test_save_preserves_question_bank(self, tmp_path: Path) -> None:
+        """保存和加载保留 question_bank 配置"""
+        config_file = tmp_path / "config.toml"
+        cfg = AppConfig(question_bank=QuestionBankConfig(enabled=True, token="tok-xyz", scopes=["ai_homework"]))
+        mgr = ConfigManager(config_file)
+        mgr.save(cfg)
+        loaded = mgr.load()
+        assert loaded.question_bank.enabled is True
+        assert loaded.question_bank.token == "tok-xyz"
+        assert loaded.question_bank.scopes == ["ai_homework"]
+
+    def test_save_preserves_skip_ai_free_exam(self, tmp_path: Path) -> None:
+        """保存/加载保留免考跳过配置"""
+        config_file = tmp_path / "config.toml"
+        cfg = AppConfig(homework=HomeworkConfig(skip_ai_free_exam=False))
+        mgr = ConfigManager(config_file)
+        mgr.save(cfg)
+        assert mgr.load().homework.skip_ai_free_exam is False
+
+    def test_roundtrip_all_defaults(self, tmp_path: Path) -> None:
+        """默认值保存后加载一致"""
+        config_file = tmp_path / "config.toml"
+        cfg = AppConfig()
+        mgr = ConfigManager(config_file)
+        mgr.save(cfg)
+        loaded = mgr.load()
+        assert loaded == cfg
+
+
+# ---------------------------------------------------------------------------
+# AIConfig — 流式超时配置
+# ---------------------------------------------------------------------------
+
+
+class TestStreamTimeoutConfig:
+    def test_defaults_are_single_source(self) -> None:
+        """默认值与 provider 共用模块常量，无第二份硬编码"""
+        ai = AIConfig()
+        assert ai.stream_timeout == DEFAULT_STREAM_TIMEOUT == 120.0
+        assert ai.stream_idle_timeout == DEFAULT_STREAM_IDLE_TIMEOUT == 30.0
+
+    def test_equal_timeouts_allowed(self) -> None:
+        """总时长等于空闲等待是合法的"""
+        ai = AIConfig(stream_timeout=30.0, stream_idle_timeout=30.0)
+        assert ai.stream_timeout == ai.stream_idle_timeout
+
+    def test_total_smaller_than_idle_rejected(self) -> None:
+        """总时长小于首包等待语义矛盾，构造即报错"""
+        with pytest.raises(ValidationError, match="stream_timeout"):
+            AIConfig(stream_timeout=10.0, stream_idle_timeout=30.0)
+
+    def test_zero_or_negative_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            AIConfig(stream_timeout=0)
+        with pytest.raises(ValidationError):
+            AIConfig(stream_idle_timeout=-1)
+
+    def test_toml_override_applies(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+[ai]
+stream_timeout = 60.0
+stream_idle_timeout = 15.0
+""",
+            encoding="utf-8",
+        )
+        cfg = ConfigManager(config_file).load()
+        assert cfg.ai.stream_timeout == 60.0
+        assert cfg.ai.stream_idle_timeout == 15.0
+
+    def test_toml_invalid_order_rejected(self, tmp_path: Path) -> None:
+        """非法配置在启动加载阶段就报错，不拖到运行时"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+[ai]
+stream_timeout = 5.0
+stream_idle_timeout = 30.0
+""",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValidationError, match="stream_timeout"):
+            ConfigManager(config_file).load()
+
+    def test_roundtrip_preserves_timeouts(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.toml"
+        cfg = AppConfig(ai=AIConfig(stream_timeout=90.0, stream_idle_timeout=20.0))
+        mgr = ConfigManager(config_file)
+        mgr.save(cfg)
+        loaded = mgr.load()
+        assert loaded.ai.stream_timeout == 90.0
+        assert loaded.ai.stream_idle_timeout == 20.0
+
+
+# ---------------------------------------------------------------------------
+# ConfigManager — 旧版 JSON 迁移
+# ---------------------------------------------------------------------------
+
+
+class TestConfigManagerMigrate:
+    def test_migrate_legacy_json(self, tmp_path: Path) -> None:
+        """旧版 JSON 配置迁移"""
+        json_file = tmp_path / "config.json"
+        legacy = {
+            "save_cookies": True,
+            "proxies": {},
+            "logLevel": "DEBUG",
+            "qr_extra": {"show_in_terminal": None, "ensure_unicode": False},
+            "image_path": "",
+            "ai": {
+                "enabled": True,
+                "use_builtin_ai": True,
+                "openai": {
+                    "api_base": "https://api.deepseek.com",
+                    "api_key": "sk-test",
+                    "model_name": "deepseek-v4-pro",
+                },
+                "use_stream": True,
+            },
+        }
+        json_file.write_text(json.dumps(legacy), encoding="utf-8")
+
+        mgr = ConfigManager(tmp_path / "config.toml")
+        cfg = mgr.migrate(json_file)
+        assert cfg.save_cookies is True
+        assert cfg.display.log_level == "DEBUG"
+
+    def test_migrate_extracts_openai_config(self, tmp_path: Path) -> None:
+        """迁移时提取 OpenAI 配置"""
+        json_file = tmp_path / "config.json"
+        legacy = {
+            "ai": {
+                "enabled": True,
+                "use_builtin_ai": False,
+                "openai": {
+                    "api_base": "https://api.deepseek.com",
+                    "api_key": "sk-abc123",
+                    "model_name": "deepseek-v4-pro",
+                },
+                "use_stream": True,
+            },
+        }
+        json_file.write_text(json.dumps(legacy), encoding="utf-8")
+
+        mgr = ConfigManager(tmp_path / "config.toml")
+        cfg = mgr.migrate(json_file)
+        assert cfg.ai.api_key == "sk-abc123"
+        assert cfg.ai.base_url == "https://api.deepseek.com"
+        assert cfg.ai.model == "deepseek-v4-pro"
+
+    def test_migrate_minimal_json(self, tmp_path: Path) -> None:
+        """迁移最小 JSON 配置"""
+        json_file = tmp_path / "config.json"
+        json_file.write_text('{"save_cookies": false}', encoding="utf-8")
+
+        mgr = ConfigManager(tmp_path / "config.toml")
+        cfg = mgr.migrate(json_file)
+        assert cfg.save_cookies is False
+
+    def test_migrate_saves_toml(self, tmp_path: Path) -> None:
+        """迁移后自动保存 TOML 文件"""
+        json_file = tmp_path / "config.json"
+        toml_file = tmp_path / "config.toml"
+        json_file.write_text('{"save_cookies": false}', encoding="utf-8")
+
+        mgr = ConfigManager(toml_file)
+        mgr.migrate(json_file)
+        assert toml_file.exists()
+        # 重新加载验证
+        loaded = mgr.load()
+        assert loaded.save_cookies is False
+
+    def test_migrate_logLevel_to_log_level(self, tmp_path: Path) -> None:
+        """迁移时 logLevel → log_level 字段名转换"""
+        json_file = tmp_path / "config.json"
+        json_file.write_text('{"logLevel": "WARNING"}', encoding="utf-8")
+
+        mgr = ConfigManager(tmp_path / "config.toml")
+        cfg = mgr.migrate(json_file)
+        assert cfg.display.log_level == "WARNING"

@@ -1,0 +1,297 @@
+"""作业编排服务
+
+从原 __main__.py 抽离的作业相关 _run_* 函数。
+"""
+
+from loguru import logger
+
+from zhs.cli.course_type import parse_ai_course_str, parse_homework_url
+from zhs.config import AppConfig
+from zhs.exceptions import SliderVerificationRequired
+from zhs.session import ZhsSession
+
+
+def dispatch_homework_url(session: ZhsSession, config: AppConfig, url: str) -> None:
+    """解析 homework URL 并分发到对应流程
+
+    支持的 URL 类型:
+    - zhidao_direct: dohomework URL → run_homework_from_url（原逻辑）
+    - ai_direct: learnPage URL → run_ai_homework（直接模式，有 node_uid）
+    - ai_scan: knowledgeStudy URL → run_ai_homework（扫描模式）
+    """
+    from zhs.cli.url_parser import parse_homework_url_v2
+
+    parsed = parse_homework_url_v2(url)
+    if parsed.type == "zhidao_direct":
+        run_homework_from_url(session, config, url)
+    elif parsed.type == "ai_direct":
+        assert parsed.course_id is not None
+        assert parsed.class_id is not None
+        run_ai_homework(
+            session,
+            config,
+            int(parsed.course_id),
+            parsed.class_id,
+            node_uid=parsed.node_uid,
+        )
+    elif parsed.type == "ai_scan":
+        assert parsed.course_id is not None
+        assert parsed.class_id is not None
+        run_ai_homework(session, config, int(parsed.course_id), parsed.class_id)
+
+
+def run_homework_from_url(session: ZhsSession, config: AppConfig, url: str) -> None:
+    """从 URL 运行作业"""
+    from zhs.utils.display import course_tag, msg_done, msg_warn, tree_print
+
+    params = parse_homework_url(url)
+    logger.info(
+        f"解析 URL: recruitId={params['recruit_id']}, examId={params['exam_id']}, "
+        f"stuExamId={params['stu_exam_id']}, courseId={params['course_id']}, schoolId={params['school_id']}"
+    )
+
+    # CAS SSO
+    session.exam_sso_login()
+
+    # 扫描该课程的所有作业
+    from zhs.cache.zhidao_cache import ZhidaoHomeworkCache
+    from zhs.zhidao.homework.models import HomeworkItem
+    from zhs.zhidao.homework.scanner import HomeworkScanner
+    from zhs.zhidao.homework.worker import HomeworkWorker
+
+    scanner = HomeworkScanner(session, config)
+    course_id = int(params["course_id"])
+    all_items = scanner.scan_homework(params["recruit_id"], course_id)
+
+    # 找到指定的作业
+    target = None
+    for item in all_items:
+        if item.exam_id == params["exam_id"]:
+            target = item
+            break
+
+    if target is None:
+        # URL 指定的作业不在列表中，构造一个 HomeworkItem
+        logger.info(f"作业 {params['exam_id']} 不在扫描列表中，使用 URL 参数构造")
+        target = HomeworkItem(
+            id=params["stu_exam_id"],
+            exam_id=params["exam_id"],
+            state=1,
+            course_id=course_id,
+            course_name="",
+            exam_name="指定作业",
+            total_score="10",
+        )
+
+    tree_print(f"{course_tag('zhidao')} 作业: {target.exam_name}", enabled=True)
+    logger.info(
+        f"  state={target.state}, score={target.score}, backNum={target.back_num}, isMarking={target.is_marking}"
+    )
+
+    from zhs.cli.bootstrap import init_llm, init_question_bank
+
+    llm = init_llm(config)
+    bank = init_question_bank(config, scope="zhidao_homework", llm=llm)
+    cache = ZhidaoHomeworkCache()
+    worker = HomeworkWorker(session, config, cache, llm=llm, question_bank=bank)
+    score_rate = worker.run_homework(target, params["recruit_id"], params["school_id"])
+
+    if score_rate >= config.homework.threshold:
+        tree_print(msg_done(f"达标: {target.exam_name} {score_rate:.1f}%"), depth=1, enabled=True)
+    else:
+        tree_print(msg_warn(f"未达标: {target.exam_name} {score_rate:.1f}%"), depth=1, enabled=True)
+
+
+def run_zhidao_homework(
+    session: ZhsSession,
+    config: AppConfig,
+    recruit_id: str,
+    course_id: int,
+    depth: int = 0,
+) -> None:
+    """运行知到课程的所有待处理作业
+
+    Args:
+        depth: 树形打印深度（0=顶层，1=在课程循环中）
+    """
+    from zhs.cache.zhidao_cache import ZhidaoHomeworkCache
+    from zhs.utils.display import (
+        course_tag,
+        msg_done,
+        msg_error,
+        msg_skip,
+        msg_warn,
+        tree_print,
+    )
+    from zhs.zhidao.homework.scanner import HomeworkScanner
+    from zhs.zhidao.homework.worker import HomeworkWorker
+
+    scanner = HomeworkScanner(session, config)
+    all_items = scanner.scan_homework(recruit_id, course_id)
+
+    tree_print(f"{course_tag('zhidao')} 课程作业: 共 {len(all_items)} 个", depth=depth, enabled=True)
+
+    pending = scanner.filter_pending(all_items)
+
+    if not pending:
+        tree_print(msg_skip("无待处理作业"), depth=depth + 1, enabled=True)
+        return
+
+    tree_print(msg_done(f"待处理: {len(pending)} 个作业"), depth=depth + 1, enabled=True)
+
+    from zhs.cli.bootstrap import init_llm, init_question_bank
+
+    llm = init_llm(config)
+    bank = init_question_bank(config, scope="zhidao_homework", llm=llm)
+    cache = ZhidaoHomeworkCache()
+    worker = HomeworkWorker(session, config, cache, llm=llm, question_bank=bank)
+
+    for item in pending:
+        try:
+            logger.info(f"开始做作业: {item.exam_name} (state={item.state}, score={item.score})")
+            score_rate = worker.run_homework(item, recruit_id, "625")
+            if score_rate >= config.homework.threshold:
+                tree_print(
+                    msg_done(f"完成: {item.exam_name} {score_rate:.1f}%"),
+                    depth=depth + 2,
+                    enabled=True,
+                )
+            else:
+                tree_print(
+                    msg_warn(f"未达标: {item.exam_name} {score_rate:.1f}%"),
+                    depth=depth + 2,
+                    enabled=True,
+                )
+        except SliderVerificationRequired:
+            # 滑块验证：服务端状态，后续作业也会失败，立即停止
+            raise
+        except Exception as e:
+            logger.error(f"作业 {item.exam_name} 处理失败: {e}")
+            tree_print(msg_error(f"失败: {item.exam_name} {e}"), depth=depth + 2, enabled=True)
+
+
+def run_all_zhidao_homework(session: ZhsSession, config: AppConfig) -> None:
+    """全刷模式：扫描所有知到课程的作业"""
+    from zhs.utils.display import course_tag, msg_error, msg_skip, tree_print
+    from zhs.zhidao.course import ZhidaoCourseManager
+    from zhs.zhidao.models import extract_course_id
+
+    # CAS SSO
+    session.exam_sso_login()
+
+    mgr = ZhidaoCourseManager(session)
+    courses = mgr.get_course_list()
+    tree_print(f"{course_tag('zhidao')} 发现 {len(courses)} 门课程", enabled=True)
+    for c in courses:
+        if not c.recruit_id:
+            tree_print(msg_skip(f"跳过(无招募ID): {c.course_name}"), depth=1, enabled=True)
+            continue
+        try:
+            recruit_id = str(c.recruit_id)
+            # 统一口径：顶层 courseId 为 0 时回退 courseInfo.courseId，取不到则为 0
+            course_id = extract_course_id(c)
+            if course_id == 0:
+                tree_print(msg_skip(f"跳过(无课程ID): {c.course_name}"), depth=1, enabled=True)
+                continue
+            run_zhidao_homework(session, config, recruit_id, course_id, depth=1)
+        except SliderVerificationRequired:
+            # 滑块验证：服务端状态，后续课程也会失败，立即停止
+            raise
+        except Exception as e:
+            logger.error(f"知到课程 {c.course_name} 作业处理失败: {e}")
+            tree_print(msg_error(f"课程失败: {c.course_name} {e}"), depth=1, enabled=True)
+
+
+def run_ai_homework(
+    session: ZhsSession,
+    config: AppConfig,
+    course_id: int,
+    class_id: int,
+    node_uid: int | None = None,
+) -> None:
+    """AI 课程作业（仅做作业，不刷视频）
+
+    Args:
+        node_uid: 知识点 ID。非 None 时走直接模式（只做该知识点作业），None 时全刷
+    """
+    from zhs.ai.course import AiCourseManager
+    from zhs.cli.bootstrap import init_question_bank
+
+    mgr = AiCourseManager(session)
+    bank = init_question_bank(config, scope="ai_homework", llm=True)  # AI 课程 LLM 由 LLMProviderFactory 内部初始化
+    mgr.run_course(
+        course_id,
+        class_id,
+        config.ai,
+        config.homework,
+        speed=config.video.ai_speed,
+        node_uid=node_uid,
+        question_bank=bank,
+    )
+
+
+def run_ai_homework_by_str(session: ZhsSession, config: AppConfig, course_id_str: str) -> None:
+    """AI 课程作业（字符串格式 courseId:classId）"""
+    parsed = parse_ai_course_str(course_id_str)
+    if parsed is None:
+        return
+    course_id, class_id = parsed
+    run_ai_homework(session, config, course_id, class_id)
+
+
+def run_all_homework(session: ZhsSession, config: AppConfig, course_type: str | None) -> None:
+    """全刷作业模式"""
+    from zhs.ai.course import AiCourseManager
+    from zhs.cli.bootstrap import init_question_bank
+    from zhs.utils.display import course_tag
+
+    # 知到课程作业
+    if course_type in (None, "auto", "zhidao"):
+        try:
+            run_all_zhidao_homework(session, config)
+        except SliderVerificationRequired:
+            # 滑块验证：立即停止，不继续 AI 课程作业
+            raise
+        except Exception as e:
+            logger.error(f"知到课程作业处理失败: {e}")
+            print(f"知到课程作业处理失败: {e}")
+
+    # AI 课程作业
+    if course_type in (None, "auto", "ai"):
+        try:
+            ai_mgr = AiCourseManager(session)
+            # AI 课程 LLM 由 LLMProviderFactory 内部初始化
+            bank = init_question_bank(config, scope="ai_homework", llm=True)
+            ai_courses = ai_mgr.get_ai_course_list()
+            print(f"\n{course_tag('ai')} 发现 {len(ai_courses)} 门课程")
+            for ac in ai_courses:
+                try:
+                    course_id = ac.get("courseId")
+                    class_id = ac.get("classId")
+                    course_name = ac.get("courseName", "")
+                    if course_id and class_id:
+                        ai_mgr.run_course(
+                            int(course_id),
+                            int(class_id),
+                            config.ai,
+                            config.homework,
+                            speed=config.video.ai_speed,
+                            question_bank=bank,
+                        )
+                    else:
+                        logger.warning(f"AI 课程 {course_name} 缺少 courseId 或 classId")
+                except Exception as e:
+                    logger.error(f"AI 课程 {ac.get('courseName', '')} 作业处理失败: {e}")
+        except Exception as e:
+            logger.error(f"获取 AI 课程列表失败: {e}")
+
+
+__all__ = [
+    "dispatch_homework_url",
+    "run_ai_homework",
+    "run_ai_homework_by_str",
+    "run_all_homework",
+    "run_all_zhidao_homework",
+    "run_homework_from_url",
+    "run_zhidao_homework",
+]

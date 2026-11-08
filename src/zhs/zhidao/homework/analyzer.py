@@ -1,0 +1,284 @@
+"""知到作业错题分析器
+
+提供 HomeworkAnalyzer 类，实现提交后检查和错题分析：
+lookHomework → getStuAnswerInfo → 保存对错到缓存 → 判断是否重做
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from loguru import logger
+
+from zhs.config import AppConfig
+from zhs.session import ZhsSession
+from zhs.utils.html import extract_text
+from zhs.zhidao.homework.models import (
+    HomeworkAnswerInfo,
+    HomeworkDetail,
+    HomeworkItem,
+    HomeworkQuestion,
+    HomeworkQuestionType,
+)
+
+if TYPE_CHECKING:
+    from zhs.cache.zhidao_cache import ZhidaoHomeworkCache as HomeworkCache
+
+
+class HomeworkAnalyzer:
+    """知到作业错题分析器"""
+
+    def __init__(
+        self,
+        session: ZhsSession,
+        config: AppConfig,
+        cache: HomeworkCache,
+    ) -> None:
+        self._session = session
+        self._config = config
+        self._cache = cache
+
+    def check_result(
+        self,
+        item: HomeworkItem,
+        recruit_id: str,
+        school_id: str,
+    ) -> tuple[list[HomeworkQuestion], dict[str, HomeworkAnswerInfo]]:
+        """检查提交结果
+
+        流程:
+        1. lookHomework 获取题目详情（数字型 id）
+        2. getStuAnswerInfo 获取每题对错信息
+        3. 返回 (题目列表, {question_id: answer_info})
+
+        Args:
+            item: 作业项
+            recruit_id: 招募 ID
+            school_id: 学校 ID
+
+        Returns:
+            (题目列表, 答案信息字典)
+        """
+        # 1. lookHomework 获取题目详情
+        detail = self._look_homework(item, recruit_id, school_id)
+        questions = self._extract_questions(detail)
+
+        if not questions:
+            logger.warning(f"作业 {item.exam_name} 查看题目为空")
+            return [], {}
+
+        # 2. getStuAnswerInfo 获取对错信息
+        question_ids = [q.id for q in questions if q.id is not None]
+        if not question_ids:
+            logger.warning(f"作业 {item.exam_name} 题目无数字型 id")
+            return questions, {}
+
+        answers = self._get_answer_info(item, recruit_id, school_id, question_ids)
+
+        logger.info(
+            f"作业 {item.exam_name}: {len(questions)} 题, "
+            f"{sum(1 for a in answers.values() if a.is_correct)} 正确, "
+            f"{sum(1 for a in answers.values() if a.is_wrong)} 错误, "
+            f"{sum(1 for a in answers.values() if a.is_unanswered)} 未答"
+        )
+
+        return questions, answers
+
+    def save_to_cache(
+        self,
+        item: HomeworkItem,
+        questions: list[HomeworkQuestion],
+        answers: dict[str, HomeworkAnswerInfo],
+    ) -> None:
+        """保存对错信息到本地缓存
+
+        - 正确的题: mark_correct（记录学生选择的选项）
+        - 错误的题: mark_wrong（记录学生选择的选项）
+        - 未答的题: 不处理
+
+        以数字型 id 为唯一 key 保存（lookHomework 返回 id）。
+        worker 重做时通过选项/内容桥接查找 id key。
+        同时保存 options 到 id key，以便 find_key_by_options 能桥接。
+
+        Args:
+            item: 作业项
+            questions: 题目列表
+            answers: 答案信息字典
+        """
+        for question in questions:
+            qid = str(question.id) if question.id is not None else ""
+            if not qid:
+                continue
+
+            answer_info = answers.get(qid)
+            if answer_info is None:
+                continue
+
+            # lookHomework 返回的题目有 options 但无 eid，保存 options 到 id key
+            if question.question_options and not question.eid:
+                self._save_question_options_to_cache(question, item)
+
+            # 只保存到数字型 id key（不再复制到 eid key）
+            key = qid
+
+            if answer_info.is_correct:
+                # 正确 → 标记选择的选项为正确
+                # auto_clear_wrong=True: 再次做对（之前做错）时清除 wrong 和 ai_analysis
+                # 首次做对（无 wrong_options）不会清除，保证性能
+                option_ids = self._parse_answer_option_ids(answer_info.answer)
+                if option_ids:
+                    self._cache.mark_correct(
+                        item.course_id,
+                        item.exam_id,
+                        key,
+                        option_ids,
+                        course_name=item.course_name,
+                        auto_clear_wrong=True,
+                    )
+                    logger.debug(f"题目 {qid} 正确: 选项 {option_ids}")
+
+            elif answer_info.is_wrong:
+                # 错误 → 根据题型存储错误选择方式
+                qt = question.question_type
+                if qt == HomeworkQuestionType.FILL:
+                    # 填空题：按 / 分割为 list[str]，每空一个元素（与提交格式一致）
+                    text = answer_info.answer.strip()
+                    if text:
+                        wrong_texts = [t.strip() for t in text.split("/") if t.strip()]
+                        self._cache.mark_wrong(
+                            item.course_id,
+                            item.exam_id,
+                            key,
+                            wrong_texts,
+                            course_name=item.course_name,
+                        )
+                        logger.debug(f"题目 {qid} 错误(填空): {wrong_texts}")
+                else:
+                    # 选择题/判断题：存完整选项组合
+                    option_ids = self._parse_answer_option_ids(answer_info.answer)
+                    if option_ids:
+                        self._cache.mark_wrong(
+                            item.course_id,
+                            item.exam_id,
+                            key,
+                            option_ids,
+                            course_name=item.course_name,
+                        )
+                        logger.debug(f"题目 {qid} 错误(选择): 组合 {option_ids}")
+
+    def _save_question_options_to_cache(self, question: HomeworkQuestion, item: HomeworkItem) -> None:
+        """保存 lookHomework 返回的题目选项到缓存（id key）"""
+        from zhs.zhidao.homework.models import HomeworkCacheOption
+
+        qid = str(question.id) if question.id is not None else ""
+        if not qid:
+            return
+
+        options = [
+            HomeworkCacheOption(id=opt.id, content=extract_text(opt.content)) for opt in question.question_options
+        ]
+        self._cache.save_options(
+            course_id=item.course_id,
+            exam_id=item.exam_id,
+            question_key=qid,
+            question_type=question.question_type_id,
+            options=options,
+            content=extract_text(question.name),
+            course_name=item.course_name,
+        )
+
+    def should_redo(self, item: HomeworkItem, score_rate: float) -> bool:
+        """判断是否需要重做
+
+        条件:
+        - score_rate < homework_threshold
+        - remaining_redo > 0（剩余重做次数 > 0）
+        - is_marking < max_submit（已重做次数未达上限）
+
+        Args:
+            item: 作业项
+            score_rate: 得分率（0-100）
+
+        Returns:
+            是否需要重做
+        """
+        if score_rate >= self._config.homework.threshold:
+            return False
+
+        if item.remaining_redo <= 0:
+            logger.debug(f"作业 {item.exam_name}: 无剩余重做次数")
+            return False
+
+        if self._config.homework.max_submit > 0 and item.is_marking >= self._config.homework.max_submit:
+            logger.debug(f"作业 {item.exam_name}: 已达最大重做次数")
+            return False
+
+        return True
+
+    def _look_homework(self, item: HomeworkItem, recruit_id: str, school_id: str) -> HomeworkDetail:
+        """调用 lookHomework 获取题目详情"""
+        result = self._session.homework_look(
+            recruit_id=recruit_id,
+            student_exam_id=item.id,
+            exam_id=item.exam_id,
+            school_id=school_id,
+            course_id=str(item.course_id),
+        )
+        rt = result.get("rt", {})
+        return HomeworkDetail.model_validate(rt)
+
+    def _extract_questions(self, detail: HomeworkDetail) -> list[HomeworkQuestion]:
+        """从 HomeworkDetail 中提取所有题目"""
+        questions: list[HomeworkQuestion] = []
+        for part in detail.exam_base.work_exam_parts:
+            questions.extend(part.question_dtos)
+        return questions
+
+    def _get_answer_info(
+        self,
+        item: HomeworkItem,
+        recruit_id: str,
+        school_id: str,
+        question_ids: list[int],
+    ) -> dict[str, HomeworkAnswerInfo]:
+        """调用 getStuAnswerInfo 获取对错信息"""
+        result = self._session.homework_get_answer(
+            recruit_id=recruit_id,
+            stu_exam_id=item.id,
+            exam_id=item.exam_id,
+            school_id=school_id,
+            course_id=str(item.course_id),
+            question_ids=question_ids,
+        )
+
+        rt = result.get("rt", {})
+        answers: dict[str, HomeworkAnswerInfo] = {}
+        for qid_str, info_data in rt.items():
+            if isinstance(info_data, dict):
+                try:
+                    answers[qid_str] = HomeworkAnswerInfo.model_validate(info_data)
+                except Exception as e:
+                    logger.warning(f"解析答案信息失败 (qid={qid_str}): {e}")
+
+        return answers
+
+    @staticmethod
+    def _parse_answer_option_ids(answer: str) -> list[int]:
+        """解析答案字符串为选项 ID 列表
+
+        单选题: "440703134" → [440703134]
+        多选题: "440703126,440703127" → [440703126, 440703127]
+        未答: "" → []
+        """
+        if not answer:
+            return []
+
+        option_ids: list[int] = []
+        for part in answer.split(","):
+            part = part.strip()
+            if part:
+                try:
+                    option_ids.append(int(part))
+                except ValueError:
+                    continue
+        return option_ids
